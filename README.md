@@ -41,6 +41,16 @@ right edges do the same when tapped (shown only when that direction exists).
    - `REFRESH` — reload the client data now.
    - `SLEEP` — turn the screen off immediately.
 
+### Screens
+
+| Home | Network speed | System |
+|------|---------------|--------|
+| ![Home](docs/img/home.png) | ![Network speed](docs/img/speed.png) | ![System](docs/img/system.png) |
+
+| Devices | Menu |
+|---------|------|
+| ![Devices](docs/img/devices.png) | ![Menu](docs/img/menu.png) |
+
 Other behaviour:
 
 - Auto-refresh daemon redraws the current view every 5 seconds.
@@ -53,16 +63,32 @@ Other behaviour:
 ./scripts/install.sh root@192.168.3.1
 ```
 
+This copies the screen program to `/usr/bin/skyris_screen_clients`, installs the
+procd init script to `/etc/init.d/skyris_screen_clients`, **enables autostart on
+boot**, and (re)starts the service.
+
 Or manually:
 
 ```sh
 scp src/skyris_screen_clients.lua root@192.168.3.1:/usr/bin/skyris_screen_clients
-ssh root@192.168.3.1 'chmod +x /usr/bin/skyris_screen_clients'
+scp scripts/skyris_screen_clients.init root@192.168.3.1:/etc/init.d/skyris_screen_clients
+ssh root@192.168.3.1 'chmod +x /usr/bin/skyris_screen_clients /etc/init.d/skyris_screen_clients && /etc/init.d/skyris_screen_clients enable && /etc/init.d/skyris_screen_clients start'
 ```
 
 If `scp` fails because the router lacks `sftp-server`, use the install script; it streams over SSH.
 
 ## Run
+
+Once installed, manage it as a service (survives reboots):
+
+```sh
+ssh root@192.168.3.1 '/etc/init.d/skyris_screen_clients start'    # start now
+ssh root@192.168.3.1 '/etc/init.d/skyris_screen_clients stop'     # stop and hand the screen back to stock
+ssh root@192.168.3.1 '/etc/init.d/skyris_screen_clients restart'  # restart
+ssh root@192.168.3.1 '/etc/init.d/skyris_screen_clients disable'  # stop starting on boot
+```
+
+The program itself also has lower-level verbs (used by the init script and for debugging):
 
 Show once:
 
@@ -76,7 +102,7 @@ Render a single view and exit (0 = home, 1 = network speed, 2 = system, then dev
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once 2'
 ```
 
-Refresh every 5 seconds:
+Run the refresh daemon directly (unmanaged — prefer the init service above):
 
 ```sh
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients daemon >/tmp/skyris_screen_clients.log 2>&1 &'

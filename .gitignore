@@ -2,4 +2,5 @@
 *.elf
 *.rgb565
 *.png
+!docs/img/*.png
 .DS_Store

@@ -38,6 +38,16 @@
    - `REFRESH` —— 立即重新加载客户端数据。
    - `SLEEP` —— 立即息屏。
 
+### 界面截图
+
+| 首页 | 网速 | 系统 |
+|------|------|------|
+| ![首页](docs/img/home.png) | ![网速](docs/img/speed.png) | ![系统](docs/img/system.png) |
+
+| 设备 | 菜单 |
+|------|------|
+| ![设备](docs/img/devices.png) | ![菜单](docs/img/menu.png) |
+
 其他行为：
 
 - 自动刷新守护进程每 5 秒重绘当前页面。
@@ -50,16 +60,31 @@
 ./scripts/install.sh root@192.168.3.1
 ```
 
+该脚本会把屏幕程序复制到 `/usr/bin/skyris_screen_clients`，把 procd 启动脚本安装到
+`/etc/init.d/skyris_screen_clients`，**启用开机自启**，并（重新）启动服务。
+
 或手动：
 
 ```sh
 scp src/skyris_screen_clients.lua root@192.168.3.1:/usr/bin/skyris_screen_clients
-ssh root@192.168.3.1 'chmod +x /usr/bin/skyris_screen_clients'
+scp scripts/skyris_screen_clients.init root@192.168.3.1:/etc/init.d/skyris_screen_clients
+ssh root@192.168.3.1 'chmod +x /usr/bin/skyris_screen_clients /etc/init.d/skyris_screen_clients && /etc/init.d/skyris_screen_clients enable && /etc/init.d/skyris_screen_clients start'
 ```
 
 如果因为路由器缺少 `sftp-server` 导致 `scp` 失败，请使用安装脚本，它通过 SSH 流式写入。
 
 ## 运行
+
+安装后，作为服务管理（重启后仍会自动运行）：
+
+```sh
+ssh root@192.168.3.1 '/etc/init.d/skyris_screen_clients start'    # 立即启动
+ssh root@192.168.3.1 '/etc/init.d/skyris_screen_clients stop'     # 停止并把屏幕交还原厂
+ssh root@192.168.3.1 '/etc/init.d/skyris_screen_clients restart'  # 重启
+ssh root@192.168.3.1 '/etc/init.d/skyris_screen_clients disable'  # 取消开机自启
+```
+
+程序本身也提供更底层的命令（供 init 脚本调用，以及调试用）：
 
 显示一次：
 
@@ -73,7 +98,7 @@ ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once'
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once 2'
 ```
 
-每 5 秒刷新：
+直接运行刷新守护进程（不受 procd 管理 —— 建议优先用上面的 init 服务）：
 
 ```sh
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients daemon >/tmp/skyris_screen_clients.log 2>&1 &'

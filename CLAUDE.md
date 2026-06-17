@@ -57,6 +57,8 @@ Everything is in `src/skyris_screen_clients.lua`. The key concepts that span the
 
 - **Process lifecycle.** This router's busybox has **no `pkill`**, so the script manages a PID file at `PIDFILE` (`/tmp/skyris_screen_clients.pid`). `getpid()` reads `$PPID` from a popen'd shell (whose parent is the Lua process) since vanilla Lua lacks getpid. `claim_pidfile()` (on daemon start) kills any previously recorded live instance then records its own PID, so relaunching replaces the old daemon instead of leaving two fighting over `/dev/fb0`; `kill_pidfile()` (the `stop` verb) kills the recorded PID. Do not reintroduce `pkill` here.
 
+- **Boot autostart.** `scripts/skyris_screen_clients.init` is an OpenWrt procd init script installed to `/etc/init.d/skyris_screen_clients` by `install.sh`, which also `enable`s it (boot start) and restarts it. It runs `skyris_screen_clients daemon` with `respawn`, and its `stop_service` restarts stock `gl_screen` to hand back the framebuffer. Prefer `/etc/init.d/skyris_screen_clients {start,stop,restart}` over launching the daemon by hand; a manual `skyris_screen_clients stop` kills the process but procd's respawn will bring it back.
+
 ## Deployment notes
 
 - The router installs the script as `/usr/bin/skyris_screen_clients` (no `.lua` extension). Process management is via the PID file (see "Process lifecycle" above), not `pkill`.
