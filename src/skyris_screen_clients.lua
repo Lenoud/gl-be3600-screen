@@ -192,7 +192,13 @@ local function rotate_cw_to_fb(buf)
   return table.concat(out)
 end
 
-local function draw_page(message)
+local DEVICE_POSITIONS = {{82,18},{82,36},{82,54},{180,18},{180,36},{180,54}}
+local PER_PAGE = #DEVICE_POSITIONS
+
+-- Draws the dashboard for a given 0-based page of the device list.
+-- Returns the clamped page and the total page count so the caller can keep
+-- its paging state in sync after the list size changes.
+local function draw_page(message, page)
   set_screen_awake(true)
   local clients = read_clients()
   local counts = {}
@@ -200,6 +206,12 @@ local function draw_page(message)
     local k = c.iface ~= '' and c.iface or '?'
     counts[k] = (counts[k] or 0) + 1
   end
+
+  local total_pages = math.max(1, math.ceil(#clients / PER_PAGE))
+  page = page or 0
+  if page < 0 then page = 0 end
+  if page > total_pages - 1 then page = total_pages - 1 end
+  local base = page * PER_PAGE
 
   local buf = newbuf(BLACK)
   fill(buf, 0, 0, 74, 75, BLUE)
@@ -218,20 +230,26 @@ local function draw_page(message)
   text(buf, 234, 5, 'OEM60', YELLOW, 1)
 
   text(buf, 82, 2, 'Devices', WHITE, 1)
-  local positions = {{82,18},{82,36},{82,54},{180,18},{180,36},{180,54}}
-  for i, c in ipairs(clients) do
-    if i > #positions then break end
-    local x, yy = positions[i][1], positions[i][2]
-    local color = (i % 2 == 1) and WHITE or GREEN
-    text(buf, x, yy, c.name, color, 1)
-    text(buf, x + 58, yy, c.tail, YELLOW, 1)
+  for i = 1, PER_PAGE do
+    local idx = base + i
+    local c = clients[idx]
+    if c then
+      local x, yy = DEVICE_POSITIONS[i][1], DEVICE_POSITIONS[i][2]
+      local color = (idx % 2 == 1) and WHITE or GREEN
+      text(buf, x, yy, c.name, color, 1)
+      text(buf, x + 58, yy, c.tail, YELLOW, 1)
+    end
   end
-  if #clients > #positions then text(buf, 262, 62, '+' .. (#clients - #positions), RED, 1) end
+  -- Page indicator: swipe left/down for next, right/up for previous.
+  if total_pages > 1 then
+    text(buf, 246, 62, (page + 1) .. '/' .. total_pages, CYAN, 1)
+  end
   if message then text(buf, 82, 66, message, RED, 1) end
 
   local f = assert(io.open(FB, 'wb'))
   f:write(rotate_cw_to_fb(buf))
   f:close()
+  return page, total_pages
 end
 
 local function log(msg)
@@ -287,37 +305,72 @@ local function map_touch_to_log(rawx, rawy)
   return x, y
 end
 
-local function poll_touch(seconds)
+-- Movement (in logical pixels) beyond which a touch is treated as a swipe
+-- rather than a tap. The canvas is 284 wide x 76 tall, so the vertical
+-- threshold is smaller than the horizontal one.
+local SWIPE_X = 30
+local SWIPE_Y = 16
+
+-- Polls touch input for up to `seconds` and classifies the gesture.
+-- Returns nil if nothing happened, otherwise a table:
+--   {kind='tap',   x=, y=}                logical tap point
+--   {kind='swipe', dir='left'|'right'|'up'|'down', x=, y=}
+local function poll_gesture(seconds)
   local rawx, rawy = nil, nil
+  local sx, sy = nil, nil  -- logical start point
+  local lx, ly = nil, nil  -- logical last point
+
+  local function sample()
+    if not rawx or not rawy then return end
+    local x, y = map_touch_to_log(rawx, rawy)
+    if not sx then sx, sy = x, y end
+    lx, ly = x, y
+  end
+
+  local function finalize()
+    if not sx then return nil end
+    local dx, dy = lx - sx, ly - sy
+    local adx, ady = math.abs(dx), math.abs(dy)
+    if adx < SWIPE_X and ady < SWIPE_Y then
+      log('tap log=' .. lx .. ',' .. ly)
+      return {kind = 'tap', x = lx, y = ly}
+    end
+    local dir
+    if adx >= ady then
+      dir = (dx < 0) and 'left' or 'right'
+    else
+      dir = (dy < 0) and 'up' or 'down'
+    end
+    log('swipe ' .. dir .. ' d=' .. dx .. ',' .. dy)
+    return {kind = 'swipe', dir = dir, x = lx, y = ly}
+  end
+
   for _ = 1, seconds do
     local events = read_touch_events(1)
     for _, e in ipairs(events) do
       -- Common single-touch ABS axes on this driver.
-      if e.type == 3 and (e.code == 0 or e.code == 53) then rawx = e.value end
-      if e.type == 3 and (e.code == 1 or e.code == 54) then rawy = e.value end
-      if e.type == 1 and e.code == 330 and e.value == 0 and rawx and rawy then
-        local x, y = map_touch_to_log(rawx, rawy)
-        log('tap raw=' .. rawx .. ',' .. rawy .. ' log=' .. x .. ',' .. y)
-        return x, y
-      end
-      -- Some touchscreens emit coordinates followed by SYN_REPORT but no BTN_TOUCH.
-      if e.type == 0 and rawx and rawy then
-        local x, y = map_touch_to_log(rawx, rawy)
-        log('tap raw=' .. rawx .. ',' .. rawy .. ' log=' .. x .. ',' .. y)
-        return x, y
+      if e.type == 3 and (e.code == 0 or e.code == 53) then rawx = e.value; sample() end
+      if e.type == 3 and (e.code == 1 or e.code == 54) then rawy = e.value; sample() end
+      -- Finger lift: BTN_TOUCH up, or MT slot tracking id cleared.
+      if (e.type == 1 and e.code == 330 and e.value == 0)
+        or (e.type == 3 and e.code == 57 and e.value == -1) then
+        local g = finalize()
+        if g then return g end
+        rawx, rawy, sx, sy, lx, ly = nil, nil, nil, nil, nil, nil
       end
     end
   end
-  return nil, nil
+  -- No explicit lift seen within the window: classify whatever we collected.
+  return finalize()
 end
 
-local function restore_oem_60()
+local function restore_oem_60(page)
   log('OEM60 start')
-  draw_page('OEM 60s')
+  draw_page('OEM 60s', page)
   run('/etc/init.d/gl_screen restart')
   os.execute('sleep 60')
   run('/etc/init.d/gl_screen stop')
-  draw_page()
+  draw_page(nil, page)
   log('OEM60 end')
 end
 
@@ -326,28 +379,38 @@ local function start_daemon()
   stock_settings = read_stock_screen_settings()
   local awake = true
   local last_activity = now()
+  local page = 0
   log('settings brightness=' .. stock_settings.brightness .. ' auto_lock=' .. stock_settings.auto_lock_time .. ' always_on=' .. tostring(stock_settings.always_on))
-  draw_page()
+  page = draw_page(nil, page)
 
   while true do
-    local x, y = poll_touch(5)
+    local g = poll_gesture(5)
     local t = now()
 
-    if x and y then
+    if g then
       last_activity = t
       stock_settings = read_stock_screen_settings()
       if not awake then
+        -- First touch after sleep only wakes the screen.
         awake = true
         log('wake')
-        draw_page('WAKE')
-      elseif x >= 228 and y <= 20 then
-        restore_oem_60()
+        page = draw_page('WAKE', page)
+      elseif g.kind == 'tap' and g.x >= 228 and g.y <= 20 then
+        restore_oem_60(page)
         last_activity = now()
         awake = true
         stock_settings = read_stock_screen_settings()
-        draw_page()
+        page = draw_page(nil, page)
+      elseif g.kind == 'swipe' then
+        -- Swipe left or down -> next page; right or up -> previous page.
+        if g.dir == 'left' or g.dir == 'down' then
+          page = page + 1
+        elseif g.dir == 'right' or g.dir == 'up' then
+          page = page - 1
+        end
+        page = draw_page(nil, page)
       else
-        draw_page('REFRESH')
+        page = draw_page('REFRESH', page)
       end
     elseif awake then
       stock_settings = read_stock_screen_settings()
@@ -359,7 +422,7 @@ local function start_daemon()
         log('sleep after ' .. tostring(t - last_activity) .. 's')
         set_screen_awake(false)
       else
-        draw_page()
+        page = draw_page(nil, page)
       end
     end
   end

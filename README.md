@@ -25,7 +25,9 @@ Observed on `192.168.3.1`:
 
 - Online device count
 - Per-interface counts (`2.4G`, `5G`, `cable`)
-- Up to six online device names plus IP tail
+- Up to six online device names plus IP tail per page; swipe to page through the full list (e.g. 100 devices). A `page/total` indicator shows in the bottom right when there is more than one page.
+  - Swipe **left** or **down**: next page.
+  - Swipe **right** or **up**: previous page.
 - `OEM60` button is drawn in the top right; tapping it temporarily restores the stock screen for 60 seconds, then switches back.
 - Tapping ordinary screen areas refreshes the dashboard.
 - Auto-refresh daemon refreshes every 5 seconds.
