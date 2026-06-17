@@ -29,7 +29,7 @@ local GRAY = rgb565(80, 80, 80)
 local BUTTON = rgb565(60, 42, 0)
 
 local FONT = {
-  [' ']={0,0,0,0,0,0,0}, ['-']={0,0,0,31,0,0,0}, ['_']={0,0,0,0,0,0,31}, ['.']={0,0,0,0,0,12,12}, [':']={0,12,12,0,12,12,0}, ['*']={0,21,14,31,14,21,0}, ['/']={1,2,4,8,16,0,0}, ['<']={1,2,4,8,4,2,1}, ['>']={16,8,4,2,4,8,16},
+  [' ']={0,0,0,0,0,0,0}, ['-']={0,0,0,31,0,0,0}, ['_']={0,0,0,0,0,0,31}, ['.']={0,0,0,0,0,12,12}, [':']={0,12,12,0,12,12,0}, ['*']={0,21,14,31,14,21,0}, ['/']={1,2,4,8,16,0,0}, ['<']={1,2,4,8,4,2,1}, ['>']={16,8,4,2,4,8,16}, ['%']={25,25,2,4,8,19,19},
   ['0']={14,17,19,21,25,17,14}, ['1']={4,12,4,4,4,4,14}, ['2']={14,17,1,2,4,8,31}, ['3']={30,1,1,14,1,1,30}, ['4']={2,6,10,18,31,2,2}, ['5']={31,16,30,1,1,17,14}, ['6']={6,8,16,30,17,17,14}, ['7']={31,1,2,4,8,8,8}, ['8']={14,17,17,14,17,17,14}, ['9']={14,17,17,15,1,2,12},
   ['A']={14,17,17,31,17,17,17}, ['B']={30,17,17,30,17,17,30}, ['C']={14,17,16,16,16,17,14}, ['D']={30,17,17,17,17,17,30}, ['E']={31,16,16,30,16,16,31}, ['F']={31,16,16,30,16,16,16}, ['G']={14,17,16,23,17,17,14}, ['H']={17,17,17,31,17,17,17}, ['I']={14,4,4,4,4,4,14}, ['J']={7,2,2,2,18,18,12}, ['K']={17,18,20,24,20,18,17}, ['L']={16,16,16,16,16,16,31}, ['M']={17,27,21,21,17,17,17}, ['N']={17,25,21,19,17,17,17}, ['O']={14,17,17,17,17,17,14}, ['P']={30,17,17,30,16,16,16}, ['Q']={14,17,17,17,21,18,13}, ['R']={30,17,17,30,20,18,17}, ['S']={15,16,16,14,1,1,30}, ['T']={31,4,4,4,4,4,4}, ['U']={17,17,17,17,17,17,14}, ['V']={17,17,17,17,17,10,4}, ['W']={17,17,17,21,21,21,10}, ['X']={17,17,10,4,10,17,17}, ['Y']={17,17,10,4,4,4,4}, ['Z']={31,1,2,4,8,16,31},
 }
@@ -230,6 +230,134 @@ local function rotate_cw_to_fb(buf)
   return table.concat(out)
 end
 
+-- ---------------------------------------------------------------------------
+-- System metrics (all read-only: /proc, /sys, df).
+-- Download/upload rate and CPU% need two samples over time, so sample_rates()
+-- keeps the previous counters and computes deltas; the daemon calls it once
+-- per loop so the cached values stay ~5s fresh regardless of the current view.
+-- ---------------------------------------------------------------------------
+local WAN_IFACE = 'eth0'
+local metrics_prev = nil   -- {t, rx, tx, cpu_idle, cpu_total}
+local metrics_cache = nil  -- {down, up, cpu}  (bytes/s, bytes/s, percent)
+
+local function read_net_bytes()
+  local f = io.open('/proc/net/dev', 'r')
+  if not f then return nil, nil end
+  local rx, tx
+  for line in f:lines() do
+    local name, rest = line:match('%s*([%w%-]+):%s*(.*)')
+    if name == WAN_IFACE then
+      local n = {}
+      for v in rest:gmatch('%d+') do n[#n + 1] = tonumber(v) end
+      rx, tx = n[1], n[9]  -- rx bytes, tx bytes
+    end
+  end
+  f:close()
+  return rx, tx
+end
+
+local function read_cpu_times()
+  local f = io.open('/proc/stat', 'r')
+  if not f then return nil, nil end
+  local line = f:read('*l') or ''
+  f:close()
+  local total, idle, i = 0, 0, 0
+  for v in line:gmatch('%d+') do
+    v = tonumber(v); i = i + 1; total = total + v
+    if i == 4 or i == 5 then idle = idle + v end  -- idle + iowait
+  end
+  return idle, total
+end
+
+local function sample_rates()
+  local t = now()
+  local rx, tx = read_net_bytes()
+  local cidle, ctotal = read_cpu_times()
+  if metrics_prev and rx and cidle then
+    local dt = t - metrics_prev.t
+    if dt > 0 then
+      local cpu = 0
+      local dtotal = ctotal - metrics_prev.cpu_total
+      if dtotal > 0 then
+        cpu = math.floor((1 - (cidle - metrics_prev.cpu_idle) / dtotal) * 100 + 0.5)
+        if cpu < 0 then cpu = 0 elseif cpu > 100 then cpu = 100 end
+      end
+      metrics_cache = {
+        down = math.max(0, (rx - metrics_prev.rx) / dt),
+        up = math.max(0, (tx - metrics_prev.tx) / dt),
+        cpu = cpu,
+      }
+    end
+  end
+  metrics_prev = {t = t, rx = rx, tx = tx, cpu_idle = cidle, cpu_total = ctotal}
+  return metrics_cache
+end
+
+-- Guarantee a rate sample exists (one-shot render path takes a 1s sample).
+local function ensure_rates()
+  if metrics_cache then return metrics_cache end
+  sample_rates()
+  os.execute('sleep 1')
+  sample_rates()
+  return metrics_cache or {down = 0, up = 0, cpu = 0}
+end
+
+local function read_mem_pct()
+  local total, avail
+  local f = io.open('/proc/meminfo', 'r')
+  if not f then return 0 end
+  for line in f:lines() do
+    local k, v = line:match('(%w+):%s*(%d+)')
+    if k == 'MemTotal' then total = tonumber(v)
+    elseif k == 'MemAvailable' then avail = tonumber(v) end
+  end
+  f:close()
+  if total and avail and total > 0 then return math.floor((total - avail) / total * 100 + 0.5) end
+  return 0
+end
+
+local function read_temp_c()
+  local mx = 0
+  for z = 0, 9 do
+    local f = io.open('/sys/class/thermal/thermal_zone' .. z .. '/temp', 'r')
+    if not f then break end
+    local v = tonumber(f:read('*a'))
+    f:close()
+    if v and v > mx then mx = v end
+  end
+  return math.floor(mx / 1000 + 0.5)
+end
+
+local function read_flash_pct()
+  return tonumber(read_cmd('df /overlay'):match('(%d+)%%')) or 0
+end
+
+local function read_load()
+  local f = io.open('/proc/loadavg', 'r')
+  if not f then return '0.00' end
+  local l = f:read('*l') or ''
+  f:close()
+  return l:match('^(%S+)') or '0.00'
+end
+
+local function read_uptime()
+  local f = io.open('/proc/uptime', 'r')
+  if not f then return '?' end
+  local s = tonumber((f:read('*l') or ''):match('^(%d+)')) or 0
+  f:close()
+  local d = math.floor(s / 86400); s = s % 86400
+  local h = math.floor(s / 3600); s = s % 3600
+  local m = math.floor(s / 60)
+  if d > 0 then return d .. 'd' .. h .. 'h' end
+  return h .. 'h' .. m .. 'm'
+end
+
+local function fmt_rate(bps)
+  if bps >= 1048576 then return string.format('%.1f MB/s', bps / 1048576)
+  elseif bps >= 1024 then return string.format('%.0f KB/s', bps / 1024)
+  else return string.format('%.0f B/s', bps) end
+end
+
 -- Device grid for the dedicated device view (full width is available here).
 local DEVICE_COLS = {8, 100, 192}
 local DEVICE_ROWS = {12, 21, 30, 39, 48, 57}
@@ -281,10 +409,14 @@ local function menu_button_at(x, y)
 end
 
 -- View model (navigate by swipe left/down = next, right/up = previous):
---   view 0           : clean home overview
---   view 1..dp       : device list pages (PER_PAGE each)
---   view dp+1 (last) : function menu
+--   view 0                : clean home overview
+--   view 1                : realtime network speed
+--   view 2                : system status
+--   view 3..2+dp          : device list pages (PER_PAGE each)
+--   view 3+dp (last)      : function menu
 -- Returns the clamped page index and the total number of views.
+local DEV_START = 3  -- first device-page view index
+
 local function draw_page(message, page)
   set_screen_awake(true)
   local clients = read_clients()
@@ -295,7 +427,7 @@ local function draw_page(message, page)
   end
 
   local device_pages = math.max(1, math.ceil(#clients / PER_PAGE))
-  local total_views = device_pages + 2
+  local total_views = DEV_START + device_pages + 1  -- + menu
   page = page or 0
   if page < 0 then page = 0 end
   if page > total_views - 1 then page = total_views - 1 end
@@ -312,9 +444,29 @@ local function draw_page(message, page)
     end
     local line = (#parts > 0) and table.concat(parts, '  ') or 'no clients'
     text(buf, center_x(line), 60, line, WHITE, 1)
-  elseif page <= device_pages then
+  elseif page == 1 then
+    -- Realtime network speed (WAN).
+    local m = ensure_rates()
+    text(buf, center_x('NETWORK SPEED'), 4, 'NETWORK SPEED', CYAN, 1)
+    text(buf, 10, 24, 'DL', CYAN, 1)
+    text(buf, 40, 20, fmt_rate(m.down), GREEN, 2)
+    text(buf, 10, 50, 'UL', CYAN, 1)
+    text(buf, 40, 46, fmt_rate(m.up), YELLOW, 2)
+  elseif page == 2 then
+    -- System status.
+    local m = ensure_rates()
+    local mem = read_mem_pct()
+    local temp = read_temp_c()
+    text(buf, center_x('SYSTEM'), 4, 'SYSTEM', CYAN, 1)
+    text(buf, 8, 22, 'CPU ' .. m.cpu .. '%', m.cpu >= 90 and RED or WHITE, 1)
+    text(buf, 8, 38, 'MEM ' .. mem .. '%', mem >= 85 and RED or WHITE, 1)
+    text(buf, 8, 54, 'TEMP ' .. temp .. 'C', temp >= 85 and RED or WHITE, 1)
+    text(buf, 150, 22, 'LOAD ' .. read_load(), WHITE, 1)
+    text(buf, 150, 38, 'FLASH ' .. read_flash_pct() .. '%', WHITE, 1)
+    text(buf, 150, 54, 'UP ' .. read_uptime(), GREEN, 1)
+  elseif page <= DEV_START - 1 + device_pages then
     -- Device list page.
-    local dpage = page - 1
+    local dpage = page - DEV_START
     local base = dpage * PER_PAGE
     text(buf, 8, 2, 'DEVICES', CYAN, 1)
     text(buf, 64, 2, #clients .. ' on', GREEN, 1)
@@ -477,13 +629,15 @@ local function start_daemon()
   local awake = true
   local last_activity = now()
   local page = 0
-  local views = 3
+  local views = DEV_START + 2
   log('settings brightness=' .. stock_settings.brightness .. ' auto_lock=' .. stock_settings.auto_lock_time .. ' always_on=' .. tostring(stock_settings.always_on))
+  sample_rates()  -- seed the rate baseline
   page, views = draw_page(nil, page)
 
   while true do
     local g = poll_gesture(5)
     local t = now()
+    sample_rates()  -- keep speed/cpu deltas ~5s fresh regardless of view
 
     if g then
       last_activity = t

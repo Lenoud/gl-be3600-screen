@@ -28,10 +28,13 @@ can also tap the far left/right edge to move between views).
 
 1. **Home** — a clean overview: title, large online device count, and per-interface
    counts (`2.4G`, `5G`, `cable`).
-2. **Devices** — the full client list, 18 per page across three columns (name + IP
+2. **Network speed** — realtime WAN download/upload rate (auto B/KB/MB units).
+3. **System** — CPU %, memory %, temperature, load average, flash usage and uptime;
+   CPU / memory / temperature turn red past their thresholds.
+4. **Devices** — the full client list, 18 per page across three columns (name + IP
    tail). With more clients it pages automatically; a `page/total` indicator shows
    top right, and swiping pages through them (e.g. 100 devices = 6 pages).
-3. **Menu** — styled function buttons, each with a short description. Tap a button:
+5. **Menu** — styled function buttons, each with a short description. Tap a button:
    - `OEM60` — restore the stock screen for 60 seconds, then switch back.
    - `REFRESH` — reload the client data now.
    - `SLEEP` — turn the screen off immediately.
