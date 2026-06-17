@@ -748,82 +748,104 @@ local function start_daemon()
   run('/etc/init.d/gl_screen stop')
   stock_settings = read_stock_screen_settings()
   local awake = true
-  local off_reason = nil  -- 'schedule' | 'idle' | 'manual' when blanked
+  local off_reason = nil  -- 'schedule' | 'idle' | 'manual' | 'temp' when blanked/temporary
   local last_activity = now()
   local page = 0
   local views = DEV_START + 2
+  local prev_sched = false
+  local TEMP_WAKE_SECS = 20  -- how long a tap lights the screen during a scheduled-off window
   log('settings brightness=' .. stock_settings.brightness .. ' auto_lock=' .. stock_settings.auto_lock_time .. ' always_on=' .. tostring(stock_settings.always_on))
   sample_rates()  -- seed the rate baseline
   load_temp_hist()  -- continue the temperature trend across restarts
   sample_temp()
   page, views = draw_page(nil, page)
 
+  -- Handle a gesture while the screen is already awake (page nav / menu).
+  local function active_gesture(g)
+    if g.kind == 'swipe' then
+      if g.dir == 'left' or g.dir == 'down' then
+        page = page + 1
+      elseif g.dir == 'right' or g.dir == 'up' then
+        page = page - 1
+      end
+      page, views = draw_page(nil, page)
+    elseif page >= views - 1 then
+      -- Tap on the menu page: dispatch the button under the finger.
+      local action = menu_button_at(g.x, g.y)
+      if action == 'oem60' then
+        restore_oem_60(page)
+        last_activity = now()
+        awake = true
+        off_reason = nil
+        stock_settings = read_stock_screen_settings()
+        page, views = draw_page(nil, page)
+      elseif action == 'sleep' then
+        awake = false
+        off_reason = 'manual'
+        log('sleep (button)')
+        set_screen_awake(false)
+      elseif action == 'refresh' then
+        page, views = draw_page('REFRESH', page)
+      elseif g.x <= NAV_LEFT_MAX then
+        page, views = draw_page(nil, page - 1)
+      else
+        page, views = draw_page(nil, page)
+      end
+    else
+      -- Tap on a non-menu view: the left/right page buttons navigate,
+      -- anything else refreshes the current view.
+      if g.x <= NAV_LEFT_MAX and page > 0 then
+        page = page - 1
+      elseif g.x >= NAV_RIGHT_MIN and page < views - 1 then
+        page = page + 1
+      end
+      page, views = draw_page(nil, page)
+    end
+  end
+
   while true do
     local g = poll_gesture(5)
     local t = now()
     sample_rates()  -- keep speed/cpu deltas ~5s fresh regardless of view
     sample_temp()   -- accumulate temperature history for the trend sparkline
+    stock_settings = read_stock_screen_settings()
+    local sched = scheduled_off(stock_settings)
+
+    -- Scheduled turn-on edge: light the screen when the on-window opens.
+    if prev_sched and not sched and not awake then
+      awake = true
+      off_reason = nil
+      last_activity = t
+      log('schedule on')
+      page, views = draw_page(nil, page)
+    end
+    prev_sched = sched
 
     if g then
-      stock_settings = read_stock_screen_settings()
-      if not awake and scheduled_off(stock_settings) then
-        -- Display is off on schedule: ignore touches until the on-window.
+      last_activity = t
+      if not awake then
+        -- Wake from any off state. During a scheduled-off window this is only
+        -- a temporary wake that blanks again after TEMP_WAKE_SECS of inactivity.
+        awake = true
+        off_reason = sched and 'temp' or nil
+        log(sched and 'temp wake' or 'wake')
+        page, views = draw_page(sched and 'TIMER' or 'WAKE', page)
       else
-        last_activity = t
-        if not awake then
-          -- First touch after sleep only wakes the screen.
-          awake = true
-          off_reason = nil
-          log('wake')
-          page, views = draw_page('WAKE', page)
-        elseif g.kind == 'swipe' then
-          -- Swipe left or down -> next view; right or up -> previous view.
-          if g.dir == 'left' or g.dir == 'down' then
-            page = page + 1
-          elseif g.dir == 'right' or g.dir == 'up' then
-            page = page - 1
-          end
-          page, views = draw_page(nil, page)
-        elseif page >= views - 1 then
-          -- Tap on the menu page: dispatch the button under the finger.
-          local action = menu_button_at(g.x, g.y)
-          if action == 'oem60' then
-            restore_oem_60(page)
-            last_activity = now()
-            awake = true
-            off_reason = nil
-            stock_settings = read_stock_screen_settings()
-            page, views = draw_page(nil, page)
-          elseif action == 'sleep' then
-            awake = false
-            off_reason = 'manual'
-            log('sleep (button)')
-            set_screen_awake(false)
-          elseif action == 'refresh' then
-            page, views = draw_page('REFRESH', page)
-          elseif g.x <= NAV_LEFT_MAX then
-            page, views = draw_page(nil, page - 1)
-          else
-            page, views = draw_page(nil, page)
-          end
-        else
-          -- Tap on a non-menu view: the left/right page buttons navigate,
-          -- anything else refreshes the current view.
-          if g.x <= NAV_LEFT_MAX and page > 0 then
-            page = page - 1
-          elseif g.x >= NAV_RIGHT_MIN and page < views - 1 then
-            page = page + 1
-          end
-          page, views = draw_page(nil, page)
-        end
+        active_gesture(g)
+        -- A tap during a scheduled-off window keeps it a temporary wake.
+        if sched then off_reason = 'temp' end
       end
     elseif awake then
-      stock_settings = read_stock_screen_settings()
-      if scheduled_off(stock_settings) then
-        awake = false
-        off_reason = 'schedule'
-        log('schedule off')
-        set_screen_awake(false)
+      if sched then
+        -- In a scheduled-off window: only a temporary wake may stay lit.
+        if off_reason == 'temp' and (t - last_activity) < TEMP_WAKE_SECS then
+          page, views = draw_page(nil, page)
+        else
+          awake = false
+          off_reason = 'schedule'
+          log('schedule off')
+          set_screen_awake(false)
+        end
       else
         local should_sleep = (not stock_settings.always_on)
           and stock_settings.auto_lock_time > 0
@@ -837,17 +859,8 @@ local function start_daemon()
           page, views = draw_page(nil, page)
         end
       end
-    else
-      -- Display is off: auto-wake when the scheduled on-window opens.
-      stock_settings = read_stock_screen_settings()
-      if off_reason == 'schedule' and not scheduled_off(stock_settings) then
-        awake = true
-        off_reason = nil
-        last_activity = now()
-        log('schedule on')
-        page, views = draw_page(nil, page)
-      end
     end
+    -- (screen off and no gesture: stay off; turn-on is handled by the edge above)
   end
 end
 
