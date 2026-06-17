@@ -1,0 +1,5 @@
+*.bin
+*.elf
+*.rgb565
+*.png
+.DS_Store
