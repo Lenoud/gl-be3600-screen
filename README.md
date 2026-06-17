@@ -32,7 +32,8 @@ right edges do the same when tapped (shown only when that direction exists).
    counts (`2.4G`, `5G`, `cable`).
 2. **Network speed** — realtime WAN download/upload rate (auto B/KB/MB units).
 3. **System** — CPU %, memory %, temperature, load average, flash usage and uptime;
-   CPU / memory / temperature turn red past their thresholds.
+   CPU / memory / temperature turn red past their thresholds, plus a temperature
+   trend sparkline (40–90 °C band, newest on the right).
 4. **Devices** — the full client list, 18 per page across three columns (name + IP
    tail). With more clients it pages automatically; a `page/total` indicator shows
    top right, and swiping pages through them (e.g. 100 devices = 6 pages).

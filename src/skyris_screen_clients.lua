@@ -412,6 +412,57 @@ local function fmt_rate(bps)
   else return string.format('%.0f B/s', bps) end
 end
 
+-- Temperature history for the System-page trend sparkline. Persisted to /tmp so
+-- a one-shot `once` render shows the trend the running daemon has accumulated,
+-- and so the series survives a daemon restart.
+local TEMP_HIST_FILE = '/tmp/skyris_temp_hist'
+local TEMP_HIST_MAX = 247
+local TEMP_MIN, TEMP_MAX = 40, 90
+local temp_hist = {}
+
+local function load_temp_hist()
+  temp_hist = {}
+  local f = io.open(TEMP_HIST_FILE, 'r')
+  if not f then return end
+  local data = f:read('*a') or ''
+  f:close()
+  for v in data:gmatch('%-?%d+') do temp_hist[#temp_hist + 1] = tonumber(v) end
+  while #temp_hist > TEMP_HIST_MAX do table.remove(temp_hist, 1) end
+end
+
+local function sample_temp()
+  temp_hist[#temp_hist + 1] = read_temp_c()
+  while #temp_hist > TEMP_HIST_MAX do table.remove(temp_hist, 1) end
+  local f = io.open(TEMP_HIST_FILE, 'w')
+  if f then f:write(table.concat(temp_hist, ' ')); f:close() end
+end
+
+-- Draw a temperature trend line inside the given box (connected polyline,
+-- coloured by the latest reading, fixed TEMP_MIN..TEMP_MAX vertical scale).
+local function draw_temp_sparkline(buf, x0, y0, x1, y1)
+  rect(buf, x0, y0, x1, y1, GRAY)
+  local n = #temp_hist
+  if n < 2 then return end
+  local span = TEMP_MAX - TEMP_MIN
+  local h = y1 - y0 - 2
+  local function ymap(tc)
+    if tc < TEMP_MIN then tc = TEMP_MIN elseif tc > TEMP_MAX then tc = TEMP_MAX end
+    return math.floor((y1 - 1) - ((tc - TEMP_MIN) / span) * h + 0.5)
+  end
+  local latest = temp_hist[n]
+  local color = latest >= 85 and RED or (latest >= 75 and YELLOW or GREEN)
+  local width = x1 - x0 - 1
+  local start = math.max(1, n - width)
+  local prevy
+  for i = start, n do
+    local x = x1 - 1 - (n - i)
+    local y = ymap(temp_hist[i])
+    if prevy then fill(buf, x, math.min(prevy, y), x, math.max(prevy, y), color) end
+    setpix(buf, x, y, color)
+    prevy = y
+  end
+end
+
 -- Device grid for the dedicated device view (full width is available here).
 local DEVICE_COLS = {8, 100, 192}
 local DEVICE_ROWS = {12, 21, 30, 39, 48, 57}
@@ -524,13 +575,16 @@ local function draw_page(message, page)
     local m = ensure_rates()
     local mem = read_mem_pct()
     local temp = read_temp_c()
-    text(buf, center_x('SYSTEM'), 4, 'SYSTEM', CYAN, 1)
-    text(buf, 8, 22, 'CPU ' .. m.cpu .. '%', m.cpu >= 90 and RED or WHITE, 1)
-    text(buf, 8, 38, 'MEM ' .. mem .. '%', mem >= 85 and RED or WHITE, 1)
-    text(buf, 8, 54, 'TEMP ' .. temp .. 'C', temp >= 85 and RED or WHITE, 1)
-    text(buf, 150, 22, 'LOAD ' .. read_load(), WHITE, 1)
-    text(buf, 150, 38, 'FLASH ' .. read_flash_pct() .. '%', WHITE, 1)
-    text(buf, 150, 54, 'UP ' .. read_uptime(), GREEN, 1)
+    if #temp_hist == 0 then load_temp_hist() end  -- one-shot render picks up daemon history
+    text(buf, center_x('SYSTEM'), 3, 'SYSTEM', CYAN, 1)
+    text(buf, 8, 15, 'CPU ' .. m.cpu .. '%', m.cpu >= 90 and RED or WHITE, 1)
+    text(buf, 8, 29, 'MEM ' .. mem .. '%', mem >= 85 and RED or WHITE, 1)
+    text(buf, 8, 43, 'TEMP ' .. temp .. 'C', temp >= 85 and RED or WHITE, 1)
+    text(buf, 150, 15, 'LOAD ' .. read_load(), WHITE, 1)
+    text(buf, 150, 29, 'FLASH ' .. read_flash_pct() .. '%', WHITE, 1)
+    text(buf, 150, 43, 'UP ' .. read_uptime(), GREEN, 1)
+    -- Temperature trend (40-90C band), newest on the right.
+    draw_temp_sparkline(buf, 16, 57, 267, 73)
   elseif page <= DEV_START - 1 + device_pages then
     -- Device list page.
     local dpage = page - DEV_START
@@ -700,12 +754,15 @@ local function start_daemon()
   local views = DEV_START + 2
   log('settings brightness=' .. stock_settings.brightness .. ' auto_lock=' .. stock_settings.auto_lock_time .. ' always_on=' .. tostring(stock_settings.always_on))
   sample_rates()  -- seed the rate baseline
+  load_temp_hist()  -- continue the temperature trend across restarts
+  sample_temp()
   page, views = draw_page(nil, page)
 
   while true do
     local g = poll_gesture(5)
     local t = now()
     sample_rates()  -- keep speed/cpu deltas ~5s fresh regardless of view
+    sample_temp()   -- accumulate temperature history for the trend sparkline
 
     if g then
       stock_settings = read_stock_screen_settings()
