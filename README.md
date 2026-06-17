@@ -1,5 +1,7 @@
 # GL-BE3600 Screen Tools
 
+*[English](README.md) | [中文](README_ZH.md)*
+
 Custom screen experiments for the GL.iNet BE3600 / IPQ5332 router touchscreen.
 
 ## Hardware notes
@@ -68,7 +70,7 @@ Show once:
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once'
 ```
 
-Render a single view and exit (0 = home, 1 = devices, last = menu) — useful for debugging:
+Render a single view and exit (0 = home, 1 = network speed, 2 = system, then device pages, last = menu) — useful for debugging:
 
 ```sh
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once 2'
