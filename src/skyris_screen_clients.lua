@@ -90,27 +90,81 @@ local function kill_pidfile()
 end
 
 local function read_stock_screen_settings()
-  local settings = {
+  local s = {
     brightness = 5,
     auto_lock_time = 600,
     always_on = false,
+    -- GL.iNet scheduled on/off timer (gl_timer.screen).
+    timer = {enable = false, on_min = nil, off_min = nil, days = {}},
   }
-  local out = read_cmd('/usr/bin/gl_screen -l')
-  for key, value in out:gmatch('([A-Z_]+)%s+([^\n]+)') do
-    value = tostring(value):gsub('^%s+', ''):gsub('%s+$', ''):gsub('^"(.*)"$', '%1')
-    if key == 'BRIGHTNESS' then
-      settings.brightness = tonumber(value) or settings.brightness
-    elseif key == 'AUTO_LOCK_TIME' then
-      settings.auto_lock_time = tonumber(value) or settings.auto_lock_time
-    elseif key == 'ALWAYS_ON' then
-      settings.always_on = tonumber(value) == 1
+  -- Read straight from uci so values match exactly what the GL admin UI writes;
+  -- `gl_screen -l` can report stale defaults (e.g. AUTO_LOCK_TIME 600 vs 180).
+  local out = read_cmd('uci -q show gl_screen.generic; uci -q show gl_timer.screen')
+  local g, tm = {}, {}
+  for k, v in out:gmatch('gl_screen%.generic%.([%w_]+)=([^\n]+)') do
+    g[k] = v:gsub("^'(.*)'$", '%1')
+  end
+  for k, v in out:gmatch('gl_timer%.screen%.([%w_]+)=([^\n]+)') do
+    tm[k] = v:gsub("^'(.*)'$", '%1')
+  end
+
+  if g.BRIGHTNESS then s.brightness = tonumber(g.BRIGHTNESS) or s.brightness end
+  if g.AUTO_LOCK_TIME then s.auto_lock_time = tonumber(g.AUTO_LOCK_TIME) or s.auto_lock_time end
+  if g.ALWAYS_ON then s.always_on = tonumber(g.ALWAYS_ON) == 1 end
+
+  -- Fallback to `gl_screen -l` only if uci had nothing useful.
+  if not g.BRIGHTNESS and not g.AUTO_LOCK_TIME then
+    local lout = read_cmd('/usr/bin/gl_screen -l')
+    for key, value in lout:gmatch('([A-Z_]+)%s+([^\n]+)') do
+      value = tostring(value):gsub('^%s+', ''):gsub('%s+$', ''):gsub('^"(.*)"$', '%1')
+      if key == 'BRIGHTNESS' then s.brightness = tonumber(value) or s.brightness
+      elseif key == 'AUTO_LOCK_TIME' then s.auto_lock_time = tonumber(value) or s.auto_lock_time
+      elseif key == 'ALWAYS_ON' then s.always_on = tonumber(value) == 1 end
     end
   end
-  if settings.brightness < 1 then settings.brightness = 1 end
-  if settings.brightness > 10 then settings.brightness = 10 end
-  if settings.auto_lock_time < 0 then settings.auto_lock_time = 0 end
-  return settings
+
+  if s.brightness < 1 then s.brightness = 1 end
+  if s.brightness > 10 then s.brightness = 10 end
+  if s.auto_lock_time < 0 then s.auto_lock_time = 0 end
+
+  s.timer.enable = tonumber(tm.enable) == 1
+  local function hm(h, m)
+    h = tonumber(h)
+    if h then return h * 60 + (tonumber(m) or 0) end
+  end
+  s.timer.on_min = hm(tm.turnon_hour, tm.turnon_min)
+  s.timer.off_min = hm(tm.turnoff_hour, tm.turnoff_min)
+  if tm.week then
+    for d in tostring(tm.week):gmatch('%d') do s.timer.days[tonumber(d)] = true end
+  end
+  return s
 end
+
+-- Current weekday (0=Sun..6=Sat), hour and minute, from the router clock.
+local function read_clock()
+  local w, h, m = read_cmd("date '+%w %H %M'"):match('(%d+)%s+(%d+)%s+(%d+)')
+  return tonumber(w) or 0, tonumber(h) or 0, tonumber(m) or 0
+end
+
+-- True when the GL scheduled timer says the display should be off right now.
+-- Overrides always-on so the nightly off-window still blanks the screen.
+local function scheduled_off(s)
+  local tmr = s.timer
+  if not (tmr.enable and tmr.on_min and tmr.off_min) then return false end
+  local wday, hour, min = read_clock()
+  if next(tmr.days) and not tmr.days[wday] then return false end  -- inactive today
+  local now_min = hour * 60 + min
+  local in_window
+  if tmr.on_min == tmr.off_min then
+    in_window = true
+  elseif tmr.on_min < tmr.off_min then
+    in_window = (now_min >= tmr.on_min and now_min < tmr.off_min)
+  else  -- on-window spans midnight
+    in_window = (now_min >= tmr.on_min or now_min < tmr.off_min)
+  end
+  return not in_window
+end
+
 
 local stock_settings = read_stock_screen_settings()
 
@@ -640,6 +694,7 @@ local function start_daemon()
   run('/etc/init.d/gl_screen stop')
   stock_settings = read_stock_screen_settings()
   local awake = true
+  local off_reason = nil  -- 'schedule' | 'idle' | 'manual' when blanked
   local last_activity = now()
   local page = 0
   local views = DEV_START + 2
@@ -653,61 +708,86 @@ local function start_daemon()
     sample_rates()  -- keep speed/cpu deltas ~5s fresh regardless of view
 
     if g then
-      last_activity = t
       stock_settings = read_stock_screen_settings()
-      if not awake then
-        -- First touch after sleep only wakes the screen.
-        awake = true
-        log('wake')
-        page, views = draw_page('WAKE', page)
-      elseif g.kind == 'swipe' then
-        -- Swipe left or down -> next view; right or up -> previous view.
-        if g.dir == 'left' or g.dir == 'down' then
-          page = page + 1
-        elseif g.dir == 'right' or g.dir == 'up' then
-          page = page - 1
-        end
-        page, views = draw_page(nil, page)
-      elseif page >= views - 1 then
-        -- Tap on the menu page: dispatch the button under the finger.
-        local action = menu_button_at(g.x, g.y)
-        if action == 'oem60' then
-          restore_oem_60(page)
-          last_activity = now()
-          awake = true
-          stock_settings = read_stock_screen_settings()
-          page, views = draw_page(nil, page)
-        elseif action == 'sleep' then
-          awake = false
-          log('sleep (button)')
-          set_screen_awake(false)
-        elseif action == 'refresh' then
-          page, views = draw_page('REFRESH', page)
-        elseif g.x <= NAV_LEFT_MAX then
-          page, views = draw_page(nil, page - 1)
-        else
-          page, views = draw_page(nil, page)
-        end
+      if not awake and scheduled_off(stock_settings) then
+        -- Display is off on schedule: ignore touches until the on-window.
       else
-        -- Tap on a non-menu view: the left/right page buttons navigate,
-        -- anything else refreshes the current view.
-        if g.x <= NAV_LEFT_MAX and page > 0 then
-          page = page - 1
-        elseif g.x >= NAV_RIGHT_MIN and page < views - 1 then
-          page = page + 1
+        last_activity = t
+        if not awake then
+          -- First touch after sleep only wakes the screen.
+          awake = true
+          off_reason = nil
+          log('wake')
+          page, views = draw_page('WAKE', page)
+        elseif g.kind == 'swipe' then
+          -- Swipe left or down -> next view; right or up -> previous view.
+          if g.dir == 'left' or g.dir == 'down' then
+            page = page + 1
+          elseif g.dir == 'right' or g.dir == 'up' then
+            page = page - 1
+          end
+          page, views = draw_page(nil, page)
+        elseif page >= views - 1 then
+          -- Tap on the menu page: dispatch the button under the finger.
+          local action = menu_button_at(g.x, g.y)
+          if action == 'oem60' then
+            restore_oem_60(page)
+            last_activity = now()
+            awake = true
+            off_reason = nil
+            stock_settings = read_stock_screen_settings()
+            page, views = draw_page(nil, page)
+          elseif action == 'sleep' then
+            awake = false
+            off_reason = 'manual'
+            log('sleep (button)')
+            set_screen_awake(false)
+          elseif action == 'refresh' then
+            page, views = draw_page('REFRESH', page)
+          elseif g.x <= NAV_LEFT_MAX then
+            page, views = draw_page(nil, page - 1)
+          else
+            page, views = draw_page(nil, page)
+          end
+        else
+          -- Tap on a non-menu view: the left/right page buttons navigate,
+          -- anything else refreshes the current view.
+          if g.x <= NAV_LEFT_MAX and page > 0 then
+            page = page - 1
+          elseif g.x >= NAV_RIGHT_MIN and page < views - 1 then
+            page = page + 1
+          end
+          page, views = draw_page(nil, page)
         end
-        page, views = draw_page(nil, page)
       end
     elseif awake then
       stock_settings = read_stock_screen_settings()
-      local should_sleep = (not stock_settings.always_on)
-        and stock_settings.auto_lock_time > 0
-        and (t - last_activity) >= stock_settings.auto_lock_time
-      if should_sleep then
+      if scheduled_off(stock_settings) then
         awake = false
-        log('sleep after ' .. tostring(t - last_activity) .. 's')
+        off_reason = 'schedule'
+        log('schedule off')
         set_screen_awake(false)
       else
+        local should_sleep = (not stock_settings.always_on)
+          and stock_settings.auto_lock_time > 0
+          and (t - last_activity) >= stock_settings.auto_lock_time
+        if should_sleep then
+          awake = false
+          off_reason = 'idle'
+          log('sleep after ' .. tostring(t - last_activity) .. 's')
+          set_screen_awake(false)
+        else
+          page, views = draw_page(nil, page)
+        end
+      end
+    else
+      -- Display is off: auto-wake when the scheduled on-window opens.
+      stock_settings = read_stock_screen_settings()
+      if off_reason == 'schedule' and not scheduled_off(stock_settings) then
+        awake = true
+        off_reason = nil
+        last_activity = now()
+        log('schedule on')
         page, views = draw_page(nil, page)
       end
     end

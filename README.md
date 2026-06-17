@@ -54,7 +54,9 @@ right edges do the same when tapped (shown only when that direction exists).
 Other behaviour:
 
 - Auto-refresh daemon redraws the current view every 5 seconds.
-- Reads the stock brightness / sleep / always-on settings; after sleep, the first touch only wakes the screen.
+- Honours the stock screen settings, read live from uci so they match exactly what the GL admin UI sets:
+  - **Brightness / auto-lock timeout / always-on** (`gl_screen.generic`). After auto-lock the first touch only wakes the screen.
+  - **Scheduled on/off timer** (`gl_timer.screen`): outside the configured on-window (on the selected weekdays) the screen blanks, and it auto-wakes when the window opens. The schedule overrides always-on so a nightly off-window still works.
 - The daemon tracks its PID in `/tmp/skyris_screen_clients.pid`; relaunching cleanly replaces a running instance and `stop` reliably kills it (this router's busybox has no `pkill`).
 
 ## Install to router
