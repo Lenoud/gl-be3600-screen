@@ -22,9 +22,9 @@ Observed on `192.168.3.1`:
 ## Current script
 
 `src/skyris_screen_clients.lua` draws a small online-client dashboard organised
-into three swipeable views. Swipe **left/down** for the next view and
-**right/up** for the previous; `<` / `>` chevrons hint when more views exist (you
-can also tap the far left/right edge to move between views).
+into five swipeable views. Swipe **left/down** for the next view and
+**right/up** for the previous; on-screen **`<` / `>` page buttons** on the left and
+right edges do the same when tapped (shown only when that direction exists).
 
 1. **Home** — a clean overview: title, large online device count, and per-interface
    counts (`2.4G`, `5G`, `cable`).

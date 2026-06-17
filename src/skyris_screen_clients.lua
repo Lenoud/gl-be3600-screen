@@ -377,10 +377,23 @@ local function center_x(s, scale)
   return math.floor((LOG_W - text_w(s, scale)) / 2)
 end
 
--- Left/right chevrons hint that there are more views to swipe to.
+-- On-screen page-turn buttons live in the narrow left/right gutters. Their tap
+-- targets are wider than the drawn tab so they are easy to hit with a finger.
+local NAV_LEFT_MAX = 14    -- tap x <= this -> previous view
+local NAV_RIGHT_MIN = 269  -- tap x >= this -> next view
+
+-- Tappable left/right page-turn buttons (drawn only when that direction exists).
 local function draw_nav(buf, page, total)
-  if page > 0 then text(buf, 1, 34, '<', GRAY, 1) end
-  if page < total - 1 then text(buf, 278, 34, '>', GRAY, 1) end
+  if page > 0 then
+    fill(buf, 0, 22, 7, 54, BLUE)
+    rect(buf, 0, 22, 7, 54, CYAN)
+    text(buf, 1, 34, '<', CYAN, 1)
+  end
+  if page < total - 1 then
+    fill(buf, 276, 22, 283, 54, BLUE)
+    rect(buf, 276, 22, 283, 54, CYAN)
+    text(buf, 278, 34, '>', CYAN, 1)
+  end
 end
 
 -- A styled menu button: filled body, accent border, accent top bar,
@@ -396,9 +409,9 @@ local function draw_button(buf, b)
 end
 
 local MENU_BUTTONS = {
-  {x0=6,   y0=22, x1=91,  y1=62, label='OEM60',   desc='Stock 60s',  action='oem60',   accent=YELLOW},
-  {x0=99,  y0=22, x1=184, y1=62, label='REFRESH', desc='Reload',     action='refresh', accent=GREEN},
-  {x0=192, y0=22, x1=277, y1=62, label='SLEEP',   desc='Screen off', action='sleep',   accent=CYAN},
+  {x0=10,  y0=22, x1=93,  y1=62, label='OEM60',   desc='Stock 60s',  action='oem60',   accent=YELLOW},
+  {x0=101, y0=22, x1=184, y1=62, label='REFRESH', desc='Reload',     action='refresh', accent=GREEN},
+  {x0=192, y0=22, x1=275, y1=62, label='SLEEP',   desc='Screen off', action='sleep',   accent=CYAN},
 }
 
 local function menu_button_at(x, y)
@@ -670,16 +683,17 @@ local function start_daemon()
           set_screen_awake(false)
         elseif action == 'refresh' then
           page, views = draw_page('REFRESH', page)
-        elseif g.x <= 10 then
+        elseif g.x <= NAV_LEFT_MAX then
           page, views = draw_page(nil, page - 1)
         else
           page, views = draw_page(nil, page)
         end
       else
-        -- Tap on home/device view: edge taps navigate, otherwise refresh.
-        if g.x <= 10 and page > 0 then
+        -- Tap on a non-menu view: the left/right page buttons navigate,
+        -- anything else refreshes the current view.
+        if g.x <= NAV_LEFT_MAX and page > 0 then
           page = page - 1
-        elseif g.x >= 272 and page < views - 1 then
+        elseif g.x >= NAV_RIGHT_MIN and page < views - 1 then
           page = page + 1
         end
         page, views = draw_page(nil, page)
