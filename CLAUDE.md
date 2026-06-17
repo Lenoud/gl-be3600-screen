@@ -21,7 +21,8 @@ luac -p src/skyris_screen_clients.lua
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once'
 
 # Restart the refresh daemon
-ssh root@192.168.3.1 'pkill -f "lua /usr/bin/skyris_screen_clients" 2>/dev/null || true; /usr/bin/skyris_screen_clients daemon >/tmp/skyris_screen_clients.log 2>&1 &'
+# Restart the refresh daemon (relaunching self-replaces a running instance)
+ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients daemon >/tmp/skyris_screen_clients.log 2>&1 &'
 
 # Tail runtime log (tap coordinates, sleep/wake, OEM60, settings)
 ssh root@192.168.3.1 'tail -50 /tmp/skyris_screen_clients.log'
@@ -44,9 +45,17 @@ Everything is in `src/skyris_screen_clients.lua`. The key concepts that span the
 
 - **Stock-screen coordination.** The custom UI and the stock `gl_screen` both own `/dev/fb0`, so they must never run simultaneously. The daemon calls `/etc/init.d/gl_screen stop` on start; `oem60` restarts stock for 60s then stops it again; `stop`/`restore` hand control back to stock. `read_stock_screen_settings()` parses `gl_screen -l` to reuse the user's brightness / auto-lock / always-on preferences rather than inventing its own.
 
-- **Daemon loop** (`start_daemon`): each iteration calls `poll_gesture()` (a 5s touch window that classifies the touch as a `tap` or a `swipe` with a direction, using `SWIPE_X`/`SWIPE_Y` thresholds in logical pixels). It then either wakes a sleeping screen (first touch only wakes — it does not also act), triggers OEM60 when a *tap* lands in the top-right hit-box, pages the device list on a *swipe* (left/down = next page, right/up = previous), or refreshes. The device list is paginated `PER_PAGE` (6) at a time via `draw_page(message, page)`, which clamps `page` against the live client count and returns the clamped page so the daemon's `page` state stays valid as devices come and go. When idle and not `always_on`, it blanks the backlight after `auto_lock_time`. Settings are re-read on each tap/idle tick so changes made in the stock UI take effect live.
+- **View model.** The UI is a linear list of swipeable views rendered by `draw_page(message, page)`: view 0 is the clean **Home** overview, views 1..N are paginated **Device** list pages (`PER_PAGE` = 18, a 3-col × 6-row grid built into `DEVICE_POSITIONS`), and the last view is the **Menu** of function buttons. `draw_page` computes `total_views = device_pages + 2`, clamps `page` into range, and returns `(page, total_views)` so the daemon's paging state stays valid as the client count changes. `view_of`-style logic in the daemon (`page == 0` → home, `page >= total-1` → menu, else device) decides how a tap is handled.
+
+- **Menu buttons.** Defined once in the `MENU_BUTTONS` table (rect + label + desc + accent + action) so drawing (`draw_button`) and hit-testing (`menu_button_at`) share the same geometry — change a button's position in one place. Actions: `oem60`, `refresh`, `sleep`.
+
+- **Daemon loop** (`start_daemon`): each iteration calls `poll_gesture()` (a 5s touch window that classifies the touch as a `tap` or a directional `swipe` using `SWIPE_X`/`SWIPE_Y` thresholds in logical pixels). Swipe left/down = next view, right/up = previous. A tap is routed by current view: on the menu it dispatches the button under the finger; on home/device an edge tap navigates, otherwise it refreshes. First touch after sleep only wakes (it does not also act). When idle and not `always_on`, it blanks the backlight after `auto_lock_time`. Settings are re-read on each tap/idle tick so changes made in the stock UI take effect live.
+
+- **Process lifecycle.** This router's busybox has **no `pkill`**, so the script manages a PID file at `PIDFILE` (`/tmp/skyris_screen_clients.pid`). `getpid()` reads `$PPID` from a popen'd shell (whose parent is the Lua process) since vanilla Lua lacks getpid. `claim_pidfile()` (on daemon start) kills any previously recorded live instance then records its own PID, so relaunching replaces the old daemon instead of leaving two fighting over `/dev/fb0`; `kill_pidfile()` (the `stop` verb) kills the recorded PID. Do not reintroduce `pkill` here.
 
 ## Deployment notes
 
-- The router installs the script as `/usr/bin/skyris_screen_clients` (no `.lua` extension). `stop` matches the running process with `pkill -f 'lua /usr/bin/skyris_screen_clients'`, which assumes the daemon was launched as a `lua` argument — verify the process command line if `stop` ever fails to kill it.
+- The router installs the script as `/usr/bin/skyris_screen_clients` (no `.lua` extension). Process management is via the PID file (see "Process lifecycle" above), not `pkill`.
+- `once [page]` renders a single view (default 0) and exits — handy for capturing a specific view's framebuffer for debugging.
+- The router has no `sftp-server`, so `scp` to it fails; `scripts/install.sh` streams the file over `ssh` instead.
 - Hardware specifics (framebuffer geometry, pixel format, touch device, observed stock binary strings) are documented in `README.md` under "Hardware notes" and "Stock screen analysis".

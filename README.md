@@ -21,17 +21,26 @@ Observed on `192.168.3.1`:
 
 ## Current script
 
-`src/skyris_screen_clients.lua` draws a small online-client dashboard:
+`src/skyris_screen_clients.lua` draws a small online-client dashboard organised
+into three swipeable views. Swipe **left/down** for the next view and
+**right/up** for the previous; `<` / `>` chevrons hint when more views exist (you
+can also tap the far left/right edge to move between views).
 
-- Online device count
-- Per-interface counts (`2.4G`, `5G`, `cable`)
-- Up to six online device names plus IP tail per page; swipe to page through the full list (e.g. 100 devices). A `page/total` indicator shows in the bottom right when there is more than one page.
-  - Swipe **left** or **down**: next page.
-  - Swipe **right** or **up**: previous page.
-- `OEM60` button is drawn in the top right; tapping it temporarily restores the stock screen for 60 seconds, then switches back.
-- Tapping ordinary screen areas refreshes the dashboard.
-- Auto-refresh daemon refreshes every 5 seconds.
+1. **Home** — a clean overview: title, large online device count, and per-interface
+   counts (`2.4G`, `5G`, `cable`).
+2. **Devices** — the full client list, 18 per page across three columns (name + IP
+   tail). With more clients it pages automatically; a `page/total` indicator shows
+   top right, and swiping pages through them (e.g. 100 devices = 6 pages).
+3. **Menu** — styled function buttons, each with a short description. Tap a button:
+   - `OEM60` — restore the stock screen for 60 seconds, then switch back.
+   - `REFRESH` — reload the client data now.
+   - `SLEEP` — turn the screen off immediately.
+
+Other behaviour:
+
+- Auto-refresh daemon redraws the current view every 5 seconds.
 - Reads the stock brightness / sleep / always-on settings; after sleep, the first touch only wakes the screen.
+- The daemon tracks its PID in `/tmp/skyris_screen_clients.pid`; relaunching cleanly replaces a running instance and `stop` reliably kills it (this router's busybox has no `pkill`).
 
 ## Install to router
 
@@ -56,10 +65,16 @@ Show once:
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once'
 ```
 
+Render a single view and exit (0 = home, 1 = devices, last = menu) — useful for debugging:
+
+```sh
+ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once 2'
+```
+
 Refresh every 5 seconds:
 
 ```sh
-ssh root@192.168.3.1 'pkill -f "lua /usr/bin/skyris_screen_clients" 2>/dev/null || true; /usr/bin/skyris_screen_clients daemon >/tmp/skyris_screen_clients.log 2>&1 &'
+ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients daemon >/tmp/skyris_screen_clients.log 2>&1 &'
 ```
 
 Restore stock GL.iNet screen:

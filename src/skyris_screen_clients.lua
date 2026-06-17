@@ -29,7 +29,7 @@ local GRAY = rgb565(80, 80, 80)
 local BUTTON = rgb565(60, 42, 0)
 
 local FONT = {
-  [' ']={0,0,0,0,0,0,0}, ['-']={0,0,0,31,0,0,0}, ['_']={0,0,0,0,0,0,31}, ['.']={0,0,0,0,0,12,12}, [':']={0,12,12,0,12,12,0}, ['*']={0,21,14,31,14,21,0}, ['/']={1,2,4,8,16,0,0},
+  [' ']={0,0,0,0,0,0,0}, ['-']={0,0,0,31,0,0,0}, ['_']={0,0,0,0,0,0,31}, ['.']={0,0,0,0,0,12,12}, [':']={0,12,12,0,12,12,0}, ['*']={0,21,14,31,14,21,0}, ['/']={1,2,4,8,16,0,0}, ['<']={1,2,4,8,4,2,1}, ['>']={16,8,4,2,4,8,16},
   ['0']={14,17,19,21,25,17,14}, ['1']={4,12,4,4,4,4,14}, ['2']={14,17,1,2,4,8,31}, ['3']={30,1,1,14,1,1,30}, ['4']={2,6,10,18,31,2,2}, ['5']={31,16,30,1,1,17,14}, ['6']={6,8,16,30,17,17,14}, ['7']={31,1,2,4,8,8,8}, ['8']={14,17,17,14,17,17,14}, ['9']={14,17,17,15,1,2,12},
   ['A']={14,17,17,31,17,17,17}, ['B']={30,17,17,30,17,17,30}, ['C']={14,17,16,16,16,17,14}, ['D']={30,17,17,17,17,17,30}, ['E']={31,16,16,30,16,16,31}, ['F']={31,16,16,30,16,16,16}, ['G']={14,17,16,23,17,17,14}, ['H']={17,17,17,31,17,17,17}, ['I']={14,4,4,4,4,4,14}, ['J']={7,2,2,2,18,18,12}, ['K']={17,18,20,24,20,18,17}, ['L']={16,16,16,16,16,16,31}, ['M']={17,27,21,21,17,17,17}, ['N']={17,25,21,19,17,17,17}, ['O']={14,17,17,17,17,17,14}, ['P']={30,17,17,30,16,16,16}, ['Q']={14,17,17,17,21,18,13}, ['R']={30,17,17,30,20,18,17}, ['S']={15,16,16,14,1,1,30}, ['T']={31,4,4,4,4,4,4}, ['U']={17,17,17,17,17,17,14}, ['V']={17,17,17,17,17,10,4}, ['W']={17,17,17,21,21,21,10}, ['X']={17,17,10,4,10,17,17}, ['Y']={17,17,10,4,4,4,4}, ['Z']={31,1,2,4,8,16,31},
 }
@@ -49,6 +49,44 @@ end
 
 local function now()
   return tonumber(read_cmd('date +%s')) or os.time()
+end
+
+-- Our own PID. io.popen spawns a shell whose parent ($PPID) is this process,
+-- so this is a portable getpid() that does not rely on luaposix.
+local function getpid()
+  return tonumber(read_cmd('echo $PPID')) or 0
+end
+
+local function pid_alive(pid)
+  if not pid or pid <= 0 then return false end
+  return read_cmd('kill -0 ' .. pid .. ' 2>/dev/null; echo $?'):match('0') ~= nil
+end
+
+-- Kill a previously recorded daemon (this busybox has no pkill), then record
+-- our own PID. Called at daemon start so relaunching cleanly replaces the old
+-- instance instead of leaving two processes fighting over the framebuffer.
+local function claim_pidfile()
+  local f = io.open(PIDFILE, 'r')
+  if f then
+    local old = tonumber((f:read('*a') or ''):match('%d+'))
+    f:close()
+    local self = getpid()
+    if old and old ~= self and pid_alive(old) then
+      run('kill ' .. old)
+      os.execute('sleep 1')
+    end
+  end
+  local w = io.open(PIDFILE, 'w')
+  if w then w:write(tostring(getpid()), '\n'); w:close() end
+end
+
+local function kill_pidfile()
+  local f = io.open(PIDFILE, 'r')
+  if not f then return end
+  local pid = tonumber((f:read('*a') or ''):match('%d+'))
+  f:close()
+  if pid and pid_alive(pid) then run('kill ' .. pid) end
+  os.remove(PIDFILE)
 end
 
 local function read_stock_screen_settings()
@@ -192,12 +230,61 @@ local function rotate_cw_to_fb(buf)
   return table.concat(out)
 end
 
-local DEVICE_POSITIONS = {{82,18},{82,36},{82,54},{180,18},{180,36},{180,54}}
-local PER_PAGE = #DEVICE_POSITIONS
+-- Device grid for the dedicated device view (full width is available here).
+local DEVICE_COLS = {8, 100, 192}
+local DEVICE_ROWS = {12, 21, 30, 39, 48, 57}
+local DEVICE_POSITIONS = {}
+for _, ry in ipairs(DEVICE_ROWS) do
+  for _, cx in ipairs(DEVICE_COLS) do
+    DEVICE_POSITIONS[#DEVICE_POSITIONS + 1] = {cx, ry}
+  end
+end
+local PER_PAGE = #DEVICE_POSITIONS  -- 18 devices per device page
 
--- Draws the dashboard for a given 0-based page of the device list.
--- Returns the clamped page and the total page count so the caller can keep
--- its paging state in sync after the list size changes.
+local function text_w(s, scale)
+  return #tostring(s) * 6 * (scale or 1)
+end
+
+local function center_x(s, scale)
+  return math.floor((LOG_W - text_w(s, scale)) / 2)
+end
+
+-- Left/right chevrons hint that there are more views to swipe to.
+local function draw_nav(buf, page, total)
+  if page > 0 then text(buf, 1, 34, '<', GRAY, 1) end
+  if page < total - 1 then text(buf, 278, 34, '>', GRAY, 1) end
+end
+
+-- A styled menu button: filled body, accent border, accent top bar,
+-- centered label, and a centered description line.
+local function draw_button(buf, b)
+  fill(buf, b.x0, b.y0, b.x1, b.y1, BUTTON)
+  fill(buf, b.x0, b.y0, b.x1, b.y0 + 2, b.accent)
+  rect(buf, b.x0, b.y0, b.x1, b.y1, b.accent)
+  text(buf, b.x0 + math.max(2, math.floor((b.x1 - b.x0 - text_w(b.label)) / 2)), b.y0 + 7, b.label, b.accent, 1)
+  if b.desc then
+    text(buf, b.x0 + math.max(2, math.floor((b.x1 - b.x0 - text_w(b.desc)) / 2)), b.y0 + 20, b.desc, WHITE, 1)
+  end
+end
+
+local MENU_BUTTONS = {
+  {x0=6,   y0=22, x1=91,  y1=62, label='OEM60',   desc='Stock 60s',  action='oem60',   accent=YELLOW},
+  {x0=99,  y0=22, x1=184, y1=62, label='REFRESH', desc='Reload',     action='refresh', accent=GREEN},
+  {x0=192, y0=22, x1=277, y1=62, label='SLEEP',   desc='Screen off', action='sleep',   accent=CYAN},
+}
+
+local function menu_button_at(x, y)
+  for _, b in ipairs(MENU_BUTTONS) do
+    if x >= b.x0 and x <= b.x1 and y >= b.y0 and y <= b.y1 then return b.action end
+  end
+  return nil
+end
+
+-- View model (navigate by swipe left/down = next, right/up = previous):
+--   view 0           : clean home overview
+--   view 1..dp       : device list pages (PER_PAGE each)
+--   view dp+1 (last) : function menu
+-- Returns the clamped page index and the total number of views.
 local function draw_page(message, page)
   set_screen_awake(true)
   local clients = read_clients()
@@ -207,49 +294,58 @@ local function draw_page(message, page)
     counts[k] = (counts[k] or 0) + 1
   end
 
-  local total_pages = math.max(1, math.ceil(#clients / PER_PAGE))
+  local device_pages = math.max(1, math.ceil(#clients / PER_PAGE))
+  local total_views = device_pages + 2
   page = page or 0
   if page < 0 then page = 0 end
-  if page > total_pages - 1 then page = total_pages - 1 end
-  local base = page * PER_PAGE
+  if page > total_views - 1 then page = total_views - 1 end
 
   local buf = newbuf(BLACK)
-  fill(buf, 0, 0, 74, 75, BLUE)
-  text(buf, 6, 5, 'ONLINE', CYAN, 1)
-  text(buf, 10, 22, tostring(#clients), GREEN, 2)
-  local y = 48
-  for _, label in ipairs({'2.4G', '5G', 'cable', '?'}) do
-    if counts[label] then
-      text(buf, 5, y, label .. ':' .. counts[label], WHITE, 1)
-      y = y + 10
+
+  if page == 0 then
+    -- Home: clean overview only.
+    text(buf, center_x('ONLINE DEVICES'), 6, 'ONLINE DEVICES', CYAN, 1)
+    text(buf, center_x(#clients, 3), 22, tostring(#clients), GREEN, 3)
+    local parts = {}
+    for _, label in ipairs({'2.4G', '5G', 'cable', '?'}) do
+      if counts[label] then parts[#parts + 1] = label .. ' ' .. counts[label] end
     end
+    local line = (#parts > 0) and table.concat(parts, '  ') or 'no clients'
+    text(buf, center_x(line), 60, line, WHITE, 1)
+  elseif page <= device_pages then
+    -- Device list page.
+    local dpage = page - 1
+    local base = dpage * PER_PAGE
+    text(buf, 8, 2, 'DEVICES', CYAN, 1)
+    text(buf, 64, 2, #clients .. ' on', GREEN, 1)
+    if device_pages > 1 then
+      local ind = (dpage + 1) .. '/' .. device_pages
+      text(buf, LOG_W - text_w(ind) - 10, 2, ind, YELLOW, 1)
+    end
+    for i = 1, PER_PAGE do
+      local idx = base + i
+      local c = clients[idx]
+      if c then
+        local x, yy = DEVICE_POSITIONS[i][1], DEVICE_POSITIONS[i][2]
+        local color = (idx % 2 == 1) and WHITE or GREEN
+        text(buf, x, yy, c.name, color, 1)
+        text(buf, x + 58, yy, c.tail, YELLOW, 1)
+      end
+    end
+  else
+    -- Menu page.
+    text(buf, 6, 5, 'MENU', CYAN, 1)
+    text(buf, LOG_W - text_w('< BACK') - 10, 5, '< BACK', GRAY, 1)
+    for _, b in ipairs(MENU_BUTTONS) do draw_button(buf, b) end
   end
 
-  fill(buf, 228, 0, 283, 16, BUTTON)
-  rect(buf, 228, 0, 283, 16, YELLOW)
-  text(buf, 234, 5, 'OEM60', YELLOW, 1)
-
-  text(buf, 82, 2, 'Devices', WHITE, 1)
-  for i = 1, PER_PAGE do
-    local idx = base + i
-    local c = clients[idx]
-    if c then
-      local x, yy = DEVICE_POSITIONS[i][1], DEVICE_POSITIONS[i][2]
-      local color = (idx % 2 == 1) and WHITE or GREEN
-      text(buf, x, yy, c.name, color, 1)
-      text(buf, x + 58, yy, c.tail, YELLOW, 1)
-    end
-  end
-  -- Page indicator: swipe left/down for next, right/up for previous.
-  if total_pages > 1 then
-    text(buf, 246, 62, (page + 1) .. '/' .. total_pages, CYAN, 1)
-  end
-  if message then text(buf, 82, 66, message, RED, 1) end
+  draw_nav(buf, page, total_views)
+  if message then text(buf, center_x(message), 68, message, RED, 1) end
 
   local f = assert(io.open(FB, 'wb'))
   f:write(rotate_cw_to_fb(buf))
   f:close()
-  return page, total_pages
+  return page, total_views
 end
 
 local function log(msg)
@@ -375,13 +471,15 @@ local function restore_oem_60(page)
 end
 
 local function start_daemon()
+  claim_pidfile()
   run('/etc/init.d/gl_screen stop')
   stock_settings = read_stock_screen_settings()
   local awake = true
   local last_activity = now()
   local page = 0
+  local views = 3
   log('settings brightness=' .. stock_settings.brightness .. ' auto_lock=' .. stock_settings.auto_lock_time .. ' always_on=' .. tostring(stock_settings.always_on))
-  page = draw_page(nil, page)
+  page, views = draw_page(nil, page)
 
   while true do
     local g = poll_gesture(5)
@@ -394,23 +492,43 @@ local function start_daemon()
         -- First touch after sleep only wakes the screen.
         awake = true
         log('wake')
-        page = draw_page('WAKE', page)
-      elseif g.kind == 'tap' and g.x >= 228 and g.y <= 20 then
-        restore_oem_60(page)
-        last_activity = now()
-        awake = true
-        stock_settings = read_stock_screen_settings()
-        page = draw_page(nil, page)
+        page, views = draw_page('WAKE', page)
       elseif g.kind == 'swipe' then
-        -- Swipe left or down -> next page; right or up -> previous page.
+        -- Swipe left or down -> next view; right or up -> previous view.
         if g.dir == 'left' or g.dir == 'down' then
           page = page + 1
         elseif g.dir == 'right' or g.dir == 'up' then
           page = page - 1
         end
-        page = draw_page(nil, page)
+        page, views = draw_page(nil, page)
+      elseif page >= views - 1 then
+        -- Tap on the menu page: dispatch the button under the finger.
+        local action = menu_button_at(g.x, g.y)
+        if action == 'oem60' then
+          restore_oem_60(page)
+          last_activity = now()
+          awake = true
+          stock_settings = read_stock_screen_settings()
+          page, views = draw_page(nil, page)
+        elseif action == 'sleep' then
+          awake = false
+          log('sleep (button)')
+          set_screen_awake(false)
+        elseif action == 'refresh' then
+          page, views = draw_page('REFRESH', page)
+        elseif g.x <= 10 then
+          page, views = draw_page(nil, page - 1)
+        else
+          page, views = draw_page(nil, page)
+        end
       else
-        page = draw_page('REFRESH', page)
+        -- Tap on home/device view: edge taps navigate, otherwise refresh.
+        if g.x <= 10 and page > 0 then
+          page = page - 1
+        elseif g.x >= 272 and page < views - 1 then
+          page = page + 1
+        end
+        page, views = draw_page(nil, page)
       end
     elseif awake then
       stock_settings = read_stock_screen_settings()
@@ -422,7 +540,7 @@ local function start_daemon()
         log('sleep after ' .. tostring(t - last_activity) .. 's')
         set_screen_awake(false)
       else
-        page = draw_page(nil, page)
+        page, views = draw_page(nil, page)
       end
     end
   end
@@ -431,7 +549,7 @@ end
 local cmd = arg[1] or 'once'
 if cmd == 'once' then
   run('/etc/init.d/gl_screen stop')
-  draw_page()
+  draw_page(nil, tonumber(arg[2]) or 0)
 elseif cmd == 'daemon' then
   start_daemon()
 elseif cmd == 'oem60' then
@@ -439,7 +557,7 @@ elseif cmd == 'oem60' then
 elseif cmd == 'restore' then
   run('/etc/init.d/gl_screen restart')
 elseif cmd == 'stop' then
-  run("pkill -f 'lua /usr/bin/skyris_screen_clients' || true")
+  kill_pidfile()
   run('/etc/init.d/gl_screen restart')
 else
   io.stderr:write('usage: skyris_screen_clients once|daemon|oem60|restore|stop\n')
