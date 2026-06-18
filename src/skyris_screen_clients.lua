@@ -26,6 +26,7 @@ local CYAN = rgb565(160, 220, 255)
 local YELLOW = rgb565(255, 210, 80)
 local RED = rgb565(255, 80, 80)
 local GRAY = rgb565(80, 80, 80)
+local LGRAY = rgb565(180, 180, 180)
 local BUTTON = rgb565(60, 42, 0)
 local RATE_HIST_MAX = 247
 local down_hist = {}
@@ -681,7 +682,7 @@ local function draw_page(message, page)
         local x, yy = DEVICE_POSITIONS[i][1], DEVICE_POSITIONS[i][2]
         local color = IFACE_COLOR[c.iface] or GRAY
         text(buf, x, yy, c.name, color, 1)
-        text(buf, x + 58, yy, c.tail, GRAY, 1)
+        text(buf, x + 58, yy, c.tail, LGRAY, 1)
       end
     end
   else
