@@ -668,9 +668,10 @@ local function draw_page(message, page)
     local base = dpage * PER_PAGE
     text(buf, 8, 2, 'DEVICES', CYAN, 1)
     text(buf, 64, 2, #clients .. ' on', GREEN, 1)
-    text(buf, 120, 2, '24', YELLOW, 1)
-    text(buf, 140, 2, '5', CYAN, 1)
-    text(buf, 152, 2, 'LAN', GREEN, 1)
+    -- Band colour legend (matches IFACE_COLOR used for the names below).
+    text(buf, 108, 2, '2.4G', YELLOW, 1)
+    text(buf, 140, 2, '5G', CYAN, 1)
+    text(buf, 164, 2, 'CABLE', GREEN, 1)
     if device_pages > 1 then
       local ind = (dpage + 1) .. '/' .. device_pages
       text(buf, LOG_W - text_w(ind) - 10, 2, ind, YELLOW, 1)
