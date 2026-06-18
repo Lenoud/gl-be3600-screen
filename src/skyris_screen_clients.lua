@@ -27,6 +27,10 @@ local YELLOW = rgb565(255, 210, 80)
 local RED = rgb565(255, 80, 80)
 local GRAY = rgb565(80, 80, 80)
 local BUTTON = rgb565(60, 42, 0)
+local RATE_HIST_MAX = 247
+local down_hist = {}
+local up_hist = {}
+local IFACE_COLOR = {['2.4G'] = YELLOW, ['5G'] = CYAN, ['cable'] = GREEN}
 
 local FONT = {
   [' ']={0,0,0,0,0,0,0}, ['-']={0,0,0,31,0,0,0}, ['_']={0,0,0,0,0,0,31}, ['.']={0,0,0,0,0,12,12}, [':']={0,12,12,0,12,12,0}, ['*']={0,21,14,31,14,21,0}, ['/']={1,2,4,8,16,0,0}, ['<']={1,2,4,8,4,2,1}, ['>']={16,8,4,2,4,8,16}, ['%']={25,25,2,4,8,19,19},
@@ -341,6 +345,10 @@ local function sample_rates()
         up = math.max(0, (tx - metrics_prev.tx) / dt),
         cpu = cpu,
       }
+      down_hist[#down_hist + 1] = metrics_cache.down
+      up_hist[#up_hist + 1] = metrics_cache.up
+      while #down_hist > RATE_HIST_MAX do table.remove(down_hist, 1) end
+      while #up_hist > RATE_HIST_MAX do table.remove(up_hist, 1) end
     end
   end
   metrics_prev = {t = t, rx = rx, tx = tx, cpu_idle = cidle, cpu_total = ctotal}
@@ -463,6 +471,35 @@ local function draw_temp_sparkline(buf, x0, y0, x1, y1)
   end
 end
 
+local function draw_rate_sparkline(buf, x0, y0, x1, y1)
+  rect(buf, x0, y0, x1, y1, GRAY)
+  local n = math.max(#down_hist, #up_hist)
+  if n < 2 then return end
+  local width = x1 - x0 - 1
+  local start = math.max(1, n - width)
+  local maxv = 1
+  for i = start, n do
+    if down_hist[i] and down_hist[i] > maxv then maxv = down_hist[i] end
+    if up_hist[i] and up_hist[i] > maxv then maxv = up_hist[i] end
+  end
+  local h = y1 - y0 - 2
+  local function ymap(v)
+    return math.floor((y1 - 1) - ((v or 0) / maxv) * h + 0.5)
+  end
+  local function draw_series(hist, color)
+    local prevy
+    for i = start, n do
+      local x = x1 - 1 - (n - i)
+      local y = ymap(hist[i])
+      if prevy then fill(buf, x, math.min(prevy, y), x, math.max(prevy, y), color) end
+      setpix(buf, x, y, color)
+      prevy = y
+    end
+  end
+  draw_series(down_hist, GREEN)
+  draw_series(up_hist, YELLOW)
+end
+
 -- Device grid for the dedicated device view (full width is available here).
 local DEVICE_COLS = {8, 100, 192}
 local DEVICE_ROWS = {12, 21, 30, 39, 48, 57}
@@ -526,14 +563,30 @@ local function menu_button_at(x, y)
   return nil
 end
 
+local function read_wan_info()
+  local raw = read_cmd('ubus call network.interface.wan status')
+  local ok, d = pcall(cjson.decode, raw)
+  if not ok or type(d) ~= 'table' then return nil end
+  local info = {up = d.up == true, proto = tostring(d.proto or ''), dev = tostring(d.l3_device or d.device or '')}
+  if type(d['ipv4-address']) == 'table' and type(d['ipv4-address'][1]) == 'table' then info.ip = d['ipv4-address'][1].address end
+  if type(d.route) == 'table' then
+    for _, r in ipairs(d.route) do
+      if r.nexthop and (r.target == '0.0.0.0' or r.mask == 0) then info.gw = r.nexthop; break end
+    end
+  end
+  if type(d['dns-server']) == 'table' then info.dns = d['dns-server'][1] end
+  return info
+end
+
 -- View model (navigate by swipe left/down = next, right/up = previous):
 --   view 0                : clean home overview
 --   view 1                : realtime network speed
---   view 2                : system status
---   view 3..2+dp          : device list pages (PER_PAGE each)
---   view 3+dp (last)      : function menu
+--   view 2                : WAN status
+--   view 3                : system status
+--   view 4..3+dp          : device list pages (PER_PAGE each)
+--   view 4+dp (last)      : function menu
 -- Returns the clamped page index and the total number of views.
-local DEV_START = 3  -- first device-page view index
+local DEV_START = 4  -- first device-page view index
 
 local function draw_page(message, page)
   set_screen_awake(true)
@@ -554,6 +607,9 @@ local function draw_page(message, page)
 
   if page == 0 then
     -- Home: clean overview only.
+    local _, hh, mm = read_clock()
+    local clk = string.format('%02d:%02d', hh, mm)
+    text(buf, LOG_W - text_w(clk) - 4, 2, clk, GRAY, 1)
     text(buf, center_x('ONLINE DEVICES'), 6, 'ONLINE DEVICES', CYAN, 1)
     text(buf, center_x(#clients, 3), 22, tostring(#clients), GREEN, 3)
     local parts = {}
@@ -565,12 +621,32 @@ local function draw_page(message, page)
   elseif page == 1 then
     -- Realtime network speed (WAN).
     local m = ensure_rates()
-    text(buf, center_x('NETWORK SPEED'), 4, 'NETWORK SPEED', CYAN, 1)
-    text(buf, 10, 24, 'DL', CYAN, 1)
-    text(buf, 40, 20, fmt_rate(m.down), GREEN, 2)
-    text(buf, 10, 50, 'UL', CYAN, 1)
-    text(buf, 40, 46, fmt_rate(m.up), YELLOW, 2)
+    text(buf, center_x('NETWORK SPEED'), 2, 'NETWORK SPEED', CYAN, 1)
+    text(buf, 8, 16, 'DL', CYAN, 1)
+    text(buf, 34, 12, fmt_rate(m.down), GREEN, 2)
+    text(buf, 8, 34, 'UL', CYAN, 1)
+    text(buf, 34, 30, fmt_rate(m.up), YELLOW, 2)
+    draw_rate_sparkline(buf, 16, 50, 267, 73)
   elseif page == 2 then
+    -- WAN status.
+    local w = read_wan_info()
+    text(buf, center_x('WAN'), 3, 'WAN', CYAN, 1)
+    if w == nil then
+      text(buf, 8, 30, 'NO DATA', RED, 1)
+    else
+      local status_str = string.upper(w.proto) .. ' ' .. string.upper(w.dev)
+      if w.up then
+        text(buf, 8, 15, 'UP', GREEN, 1)
+        text(buf, 8 + text_w('UP') + 4, 15, status_str, WHITE, 1)
+      else
+        text(buf, 8, 15, 'DOWN', RED, 1)
+        text(buf, 8 + text_w('DOWN') + 4, 15, status_str, WHITE, 1)
+      end
+      text(buf, 8, 29, 'IP ' .. (w.ip or '--'), WHITE, 1)
+      text(buf, 8, 43, 'GW ' .. (w.gw or '--'), WHITE, 1)
+      text(buf, 8, 57, 'DNS ' .. (w.dns or '--'), CYAN, 1)
+    end
+  elseif page == 3 then
     -- System status.
     local m = ensure_rates()
     local mem = read_mem_pct()
@@ -591,6 +667,9 @@ local function draw_page(message, page)
     local base = dpage * PER_PAGE
     text(buf, 8, 2, 'DEVICES', CYAN, 1)
     text(buf, 64, 2, #clients .. ' on', GREEN, 1)
+    text(buf, 120, 2, '24', YELLOW, 1)
+    text(buf, 140, 2, '5', CYAN, 1)
+    text(buf, 152, 2, 'LAN', GREEN, 1)
     if device_pages > 1 then
       local ind = (dpage + 1) .. '/' .. device_pages
       text(buf, LOG_W - text_w(ind) - 10, 2, ind, YELLOW, 1)
@@ -600,9 +679,9 @@ local function draw_page(message, page)
       local c = clients[idx]
       if c then
         local x, yy = DEVICE_POSITIONS[i][1], DEVICE_POSITIONS[i][2]
-        local color = (idx % 2 == 1) and WHITE or GREEN
+        local color = IFACE_COLOR[c.iface] or GRAY
         text(buf, x, yy, c.name, color, 1)
-        text(buf, x + 58, yy, c.tail, YELLOW, 1)
+        text(buf, x + 58, yy, c.tail, GRAY, 1)
       end
     end
   else

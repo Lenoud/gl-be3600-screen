@@ -24,33 +24,38 @@ Observed on `192.168.3.1`:
 ## Current script
 
 `src/skyris_screen_clients.lua` draws a small online-client dashboard organised
-into five swipeable views. Swipe **left/down** for the next view and
+into six swipeable views. Swipe **left/down** for the next view and
 **right/up** for the previous; on-screen **`<` / `>` page buttons** on the left and
 right edges do the same when tapped (shown only when that direction exists).
 
-1. **Home** — a clean overview: title, large online device count, and per-interface
-   counts (`2.4G`, `5G`, `cable`).
-2. **Network speed** — realtime WAN download/upload rate (auto B/KB/MB units).
-3. **System** — CPU %, memory %, temperature, load average, flash usage and uptime;
+1. **Home** — a clean overview: title, large online device count, per-interface
+   counts (`2.4G`, `5G`, `cable`), and a `HH:MM` clock in the top-right corner.
+2. **Network speed** — realtime WAN download/upload rate (auto B/KB/MB units) with a
+   download (green) / upload (yellow) throughput trend sparkline that fills in as the
+   daemon runs.
+3. **WAN** — internet status: link up/down, protocol and device, WAN IP, gateway and
+   DNS (each field shows `--` until the link is up).
+4. **System** — CPU %, memory %, temperature, load average, flash usage and uptime;
    CPU / memory / temperature turn red past their thresholds, plus a temperature
    trend sparkline (40–90 °C band, newest on the right).
-4. **Devices** — the full client list, 18 per page across three columns (name + IP
-   tail). With more clients it pages automatically; a `page/total` indicator shows
-   top right, and swiping pages through them (e.g. 100 devices = 6 pages).
-5. **Menu** — styled function buttons, each with a short description. Tap a button:
+5. **Devices** — the full client list, 18 per page across three columns. Each name is
+   coloured by band (2.4G yellow, 5G cyan, cable green; legend in the header) with the
+   IP tail beside it. With more clients it pages automatically; a `page/total`
+   indicator shows top right, and swiping pages through them (e.g. 100 devices = 6 pages).
+6. **Menu** — styled function buttons, each with a short description. Tap a button:
    - `OEM60` — restore the stock screen for 60 seconds, then switch back.
    - `REFRESH` — reload the client data now.
    - `SLEEP` — turn the screen off immediately.
 
 ### Screens
 
-| Home | Network speed | System |
-|------|---------------|--------|
-| ![Home](docs/img/home.png) | ![Network speed](docs/img/speed.png) | ![System](docs/img/system.png) |
+| Home | Network speed | WAN |
+|------|---------------|-----|
+| ![Home](docs/img/home.png) | ![Network speed](docs/img/speed.png) | ![WAN](docs/img/wan.png) |
 
-| Devices | Menu |
-|---------|------|
-| ![Devices](docs/img/devices.png) | ![Menu](docs/img/menu.png) |
+| System | Devices | Menu |
+|--------|---------|------|
+| ![System](docs/img/system.png) | ![Devices](docs/img/devices.png) | ![Menu](docs/img/menu.png) |
 
 Other behaviour:
 
@@ -99,7 +104,7 @@ Show once:
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once'
 ```
 
-Render a single view and exit (0 = home, 1 = network speed, 2 = system, then device pages, last = menu) — useful for debugging:
+Render a single view and exit (0 = home, 1 = network speed, 2 = WAN, 3 = system, then device pages, last = menu) — useful for debugging:
 
 ```sh
 ssh root@192.168.3.1 '/usr/bin/skyris_screen_clients once 2'
