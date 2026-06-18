@@ -391,6 +391,26 @@ local function read_temp_c()
   return math.floor(mx / 1000 + 0.5)
 end
 
+local FAN_RPM_PATH = '/sys/class/hwmon/hwmon0/fan1_input'
+
+local function read_fan_rpm()
+  local f = io.open(FAN_RPM_PATH, 'r')
+  if not f then return 0 end
+  local v = tonumber((f:read('*a') or ''):match('%d+'))
+  f:close()
+  return v or 0
+end
+
+local function read_fan_target()
+  return tonumber(read_cmd('uci -q get glfan.globals.temperature')) or 75
+end
+
+local function set_fan_target(temp)
+  if temp < 50 then temp = 50 elseif temp > 90 then temp = 90 end
+  run('uci set glfan.globals.temperature=' .. temp .. '; uci commit glfan; /etc/init.d/gl_fan restart')
+  return temp
+end
+
 local function read_flash_pct()
   return tonumber(read_cmd('df /overlay'):match('(%d+)%%')) or 0
 end
@@ -564,6 +584,20 @@ local function menu_button_at(x, y)
   return nil
 end
 
+local FAN_BTNS = {
+  {x0=16,  y0=18, x1=76,  y1=62, label='QUIET', temp=85, accent=CYAN},
+  {x0=80,  y0=18, x1=140, y1=62, label='AUTO',  temp=75, accent=GREEN},
+  {x0=144, y0=18, x1=204, y1=62, label='COOL',  temp=65, accent=YELLOW},
+  {x0=208, y0=18, x1=268, y1=62, label='PERF',  temp=55, accent=RED},
+}
+
+local function fan_button_at(x, y)
+  for _, b in ipairs(FAN_BTNS) do
+    if x >= b.x0 and x <= b.x1 and y >= b.y0 and y <= b.y1 then return b.temp end
+  end
+  return nil
+end
+
 local function read_wan_info()
   local raw = read_cmd('ubus call network.interface.wan status')
   local ok, d = pcall(cjson.decode, raw)
@@ -584,10 +618,12 @@ end
 --   view 1                : realtime network speed
 --   view 2                : WAN status
 --   view 3                : system status
---   view 4..3+dp          : device list pages (PER_PAGE each)
---   view 4+dp (last)      : function menu
+--   view 4                : fan status/control
+--   view 5..4+dp          : device list pages (PER_PAGE each)
+--   view 5+dp (last)      : function menu
 -- Returns the clamped page index and the total number of views.
-local DEV_START = 4  -- first device-page view index
+local DEV_START = 5  -- first device-page view index
+local FAN_VIEW = DEV_START - 1
 
 local function draw_page(message, page)
   set_screen_awake(true)
@@ -657,11 +693,32 @@ local function draw_page(message, page)
     text(buf, 8, 15, 'CPU ' .. m.cpu .. '%', m.cpu >= 90 and RED or WHITE, 1)
     text(buf, 8, 29, 'MEM ' .. mem .. '%', mem >= 85 and RED or WHITE, 1)
     text(buf, 8, 43, 'TEMP ' .. temp .. 'C', temp >= 85 and RED or WHITE, 1)
+    local fan_rpm = read_fan_rpm()
+    local fan_str = fan_rpm > 0 and ('FAN ' .. fan_rpm) or 'FAN OFF'
+    text(buf, 78, 43, fan_str, fan_rpm > 0 and GREEN or LGRAY, 1)
     text(buf, 150, 15, 'LOAD ' .. read_load(), WHITE, 1)
     text(buf, 150, 29, 'FLASH ' .. read_flash_pct() .. '%', WHITE, 1)
     text(buf, 150, 43, 'UP ' .. read_uptime(), GREEN, 1)
     -- Temperature trend (40-90C band), newest on the right.
     draw_temp_sparkline(buf, 16, 57, 267, 73)
+  elseif page == FAN_VIEW then
+    local rpm = read_fan_rpm()
+    local target = read_fan_target()
+    text(buf, 8, 3, 'FAN', CYAN, 1)
+    local rpms = rpm > 0 and (rpm .. ' RPM') or 'OFF'
+    text(buf, 78, 3, rpms, rpm > 0 and GREEN or LGRAY, 1)
+    local tgt = 'TGT ' .. target .. 'C'
+    text(buf, LOG_W - text_w(tgt) - 10, 3, tgt, WHITE, 1)
+    for _, b in ipairs(FAN_BTNS) do
+      local active = (b.temp == target)
+      fill(buf, b.x0, b.y0, b.x1, b.y1, BUTTON)
+      rect(buf, b.x0, b.y0, b.x1, b.y1, active and b.accent or GRAY)
+      if active then rect(buf, b.x0+1, b.y0+1, b.x1-1, b.y1-1, b.accent) end
+      local lc = active and b.accent or LGRAY
+      text(buf, b.x0 + math.max(2, math.floor((b.x1 - b.x0 - text_w(b.label)) / 2)), b.y0 + 8, b.label, lc, 1)
+      local tt = b.temp .. 'C'
+      text(buf, b.x0 + math.max(2, math.floor((b.x1 - b.x0 - text_w(tt)) / 2)), b.y0 + 24, tt, active and WHITE or LGRAY, 1)
+    end
   elseif page <= DEV_START - 1 + device_pages then
     -- Device list page.
     local dpage = page - DEV_START
@@ -869,6 +926,18 @@ local function start_daemon()
         page, views = draw_page('REFRESH', page)
       elseif g.x <= NAV_LEFT_MAX then
         page, views = draw_page(nil, page - 1)
+      else
+        page, views = draw_page(nil, page)
+      end
+    elseif page == FAN_VIEW then
+      local t = fan_button_at(g.x, g.y)
+      if t then
+        set_fan_target(t)
+        page, views = draw_page('FAN ' .. t .. 'C', page)
+      elseif g.x <= NAV_LEFT_MAX and page > 0 then
+        page, views = draw_page(nil, page - 1)
+      elseif g.x >= NAV_RIGHT_MIN and page < views - 1 then
+        page, views = draw_page(nil, page + 1)
       else
         page, views = draw_page(nil, page)
       end
